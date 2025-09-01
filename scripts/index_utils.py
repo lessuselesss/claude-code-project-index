@@ -113,26 +113,123 @@ def extract_python_signatures(content: str) -> Dict[str, Dict]:
     """Extract Python function and class signatures with full details for all files."""
     functions = {}
     classes = {}
+    lines = content.split('\n')
     
-    # Basic function extraction
-    func_pattern = r'def\s+(\w+)\s*\([^)]*\):'
-    for match in re.finditer(func_pattern, content, re.MULTILINE):
-        func_name = match.group(1)
-        functions[func_name] = {
-            'name': func_name,
-            'type': 'function',
-            'line': content[:match.start()].count('\n') + 1
-        }
+    # Extract functions with more comprehensive pattern
+    func_pattern = r'^(\s*)def\s+(\w+)\s*\(([^)]*)\)\s*(?:->\s*[^:]+)?\s*:'
+    for i, line in enumerate(lines):
+        match = re.match(func_pattern, line)
+        if match:
+            indent, func_name, params = match.groups()
+            
+            # Extract docstring if present
+            doc = ""
+            doc_start = i + 1
+            if doc_start < len(lines) and '"""' in lines[doc_start]:
+                doc_lines = []
+                in_docstring = False
+                for j in range(doc_start, min(doc_start + 10, len(lines))):
+                    if '"""' in lines[j]:
+                        if in_docstring:
+                            break
+                        else:
+                            in_docstring = True
+                            doc_lines.append(lines[j].strip().replace('"""', '').strip())
+                    elif in_docstring:
+                        doc_lines.append(lines[j].strip())
+                doc = ' '.join(doc_lines).strip()
+            
+            functions[func_name] = {
+                'name': func_name,
+                'type': 'function',
+                'line': i + 1,
+                'signature': f"({params})",
+                'doc': doc,
+                'indent_level': len(indent) // 4  # Assuming 4-space indentation
+            }
     
-    # Basic class extraction
-    class_pattern = r'class\s+(\w+).*?:'
-    for match in re.finditer(class_pattern, content, re.MULTILINE):
-        class_name = match.group(1)
-        classes[class_name] = {
-            'name': class_name,
-            'type': 'class',
-            'line': content[:match.start()].count('\n') + 1
-        }
+    # Extract classes with methods
+    class_pattern = r'^(\s*)class\s+(\w+)(\([^)]*\))?\s*:'
+    current_class = None
+    current_class_indent = -1
+    
+    for i, line in enumerate(lines):
+        class_match = re.match(class_pattern, line)
+        if class_match:
+            indent, class_name, inheritance = class_match.groups()
+            indent_level = len(indent) // 4
+            
+            # Extract docstring if present
+            doc = ""
+            doc_start = i + 1
+            if doc_start < len(lines) and '"""' in lines[doc_start]:
+                doc_lines = []
+                in_docstring = False
+                for j in range(doc_start, min(doc_start + 10, len(lines))):
+                    if '"""' in lines[j]:
+                        if in_docstring:
+                            break
+                        else:
+                            in_docstring = True
+                            doc_lines.append(lines[j].strip().replace('"""', '').strip())
+                    elif in_docstring:
+                        doc_lines.append(lines[j].strip())
+                doc = ' '.join(doc_lines).strip()
+            
+            classes[class_name] = {
+                'name': class_name,
+                'type': 'class',
+                'line': i + 1,
+                'doc': doc,
+                'methods': {},
+                'indent_level': indent_level
+            }
+            
+            if inheritance:
+                classes[class_name]['inherits'] = inheritance.strip('()')
+            
+            current_class = class_name
+            current_class_indent = indent_level
+        
+        # Check for methods within classes
+        elif current_class is not None:
+            method_match = re.match(r'^(\s+)def\s+(\w+)\s*\(([^)]*)\)\s*(?:->\s*[^:]+)?\s*:', line)
+            if method_match:
+                method_indent, method_name, method_params = method_match.groups()
+                method_indent_level = len(method_indent) // 4
+                
+                # If method is at class level (one level deeper than class)
+                if method_indent_level == current_class_indent + 1:
+                    # Extract method docstring
+                    method_doc = ""
+                    doc_start = i + 1
+                    if doc_start < len(lines) and '"""' in lines[doc_start]:
+                        doc_lines = []
+                        in_docstring = False
+                        for j in range(doc_start, min(doc_start + 10, len(lines))):
+                            if '"""' in lines[j]:
+                                if in_docstring:
+                                    break
+                                else:
+                                    in_docstring = True
+                                    doc_lines.append(lines[j].strip().replace('"""', '').strip())
+                            elif in_docstring:
+                                doc_lines.append(lines[j].strip())
+                        method_doc = ' '.join(doc_lines).strip()
+                    
+                    classes[current_class]['methods'][method_name] = {
+                        'name': method_name,
+                        'type': 'method',
+                        'line': i + 1,
+                        'signature': f"({method_params})",
+                        'doc': method_doc
+                    }
+            
+            # Reset current class if we've moved to a different indentation level
+            elif line.strip() and not line.startswith(' ' * ((current_class_indent + 1) * 4)):
+                if not line.startswith(' ' * (current_class_indent * 4)):
+                    current_class = None
+                    current_class_indent = -1
     
     return {'functions': functions, 'classes': classes}
 

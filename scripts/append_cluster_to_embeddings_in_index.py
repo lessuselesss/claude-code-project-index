@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """
-Similarity Index for Claude Code
-Find similar code patterns using neural embeddings with integrated caching
+Append Cluster to Embeddings in Index
+Step 3 of the embedding workflow: Build similarity cache and append to PROJECT_INDEX.json
 
-Features:
-- Multiple similarity algorithms (cosine, euclidean, manhattan, dot-product, jaccard)
-- Integrated caching in PROJECT_INDEX.json for fast queries
-- Custom output files with -o flag for experimentation
-- Cache validation and invalidation based on embedding changes
-- Duplicate detection and similarity search
-- Real-time and cached query modes
+This script builds similarity matrices and clustering data from existing embeddings
+and appends the results to PROJECT_INDEX.json for fast future queries.
 
-Usage: python similarity_index.py [OPTIONS]
+Workflow position: project_index.py → append_embeddings_to_index.py → THIS SCRIPT
 """
 
 __version__ = "0.1.0"
@@ -20,8 +15,6 @@ import json
 import math
 import argparse
 import sys
-import urllib.request
-import urllib.error
 import hashlib
 from datetime import datetime
 from pathlib import Path
@@ -152,8 +145,9 @@ def load_project_index(index_path: str = "PROJECT_INDEX.json") -> Dict:
             return json.load(f)
     except FileNotFoundError:
         print(f"❌ Error: {index_path} not found!")
-        print("   Run project_index.py with -e flag to generate embeddings first:")
-        print(f"   python3 scripts/project_index.py -e")
+        print("   Run the embedding workflow first:")
+        print("   1. python3 scripts/project_index.py")
+        print("   2. python3 scripts/append_embeddings_to_index.py")
         sys.exit(1)
     except json.JSONDecodeError as e:
         print(f"❌ Error: Invalid JSON in {index_path}: {e}")
@@ -174,13 +168,9 @@ def extract_embeddings_from_index(index: Dict) -> List[Dict]:
     """Extract all embeddings with metadata from the project index."""
     embeddings = []
     
-    # Check both compressed and original formats
+    # Extract from files section with full embedding data
     files_data = index.get('files', {})
-    if not files_data and 'f' in index:
-        # Handle compressed format - need to reconstruct from original files section
-        files_data = index.get('files', {})
     
-    # Extract from original format (files section with full embedding data)
     for file_path, file_data in files_data.items():
         if not isinstance(file_data, dict):
             continue
@@ -221,27 +211,6 @@ def extract_embeddings_from_index(index: Dict) -> List[Dict]:
                         })
     
     return embeddings
-
-
-def generate_embedding_for_query(query: str, model_name: str = "nomic-embed-text", 
-                                endpoint: str = "http://localhost:11434") -> Optional[List[float]]:
-    """Generate embedding for a query string."""
-    try:
-        url = f"{endpoint}/api/embeddings"
-        data = json.dumps({
-            "model": model_name,
-            "prompt": query
-        }).encode('utf-8')
-        
-        req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
-        
-        with urllib.request.urlopen(req, timeout=10) as response:
-            if response.status == 200:
-                result = json.loads(response.read().decode('utf-8'))
-                return result.get('embedding')
-    except Exception as e:
-        print(f"❌ Error generating embedding for query: {e}")
-        return None
 
 
 def build_similarity_cache(embeddings: List[Dict], algorithms: List[str], 
@@ -359,43 +328,6 @@ def find_duplicates_internal(embeddings: List[Dict], similarity_func: Callable, 
     return duplicates
 
 
-def query_from_cache(query: str, index: Dict, algorithm: str = 'cosine',
-                    top_k: int = 10, threshold: float = 0.5,
-                    endpoint: str = "http://localhost:11434",
-                    model_name: str = "nomic-embed-text") -> List[Tuple[Dict, float]]:
-    """Query similarities using cached data for speed."""
-    # Generate query embedding
-    query_embedding = generate_embedding_for_query(query, model_name, endpoint)
-    if not query_embedding:
-        return []
-    
-    # Get algorithm function
-    try:
-        similarity_func = get_similarity_algorithm(algorithm)
-    except ValueError as e:
-        print(f"❌ {e}")
-        return []
-    
-    # Get all embeddings
-    embeddings = extract_embeddings_from_index(index)
-    if not embeddings:
-        return []
-    
-    # Calculate similarities
-    results = []
-    for item in embeddings:
-        try:
-            similarity = similarity_func(query_embedding, item['embedding'])
-            if similarity >= threshold:
-                results.append((item, similarity))
-        except Exception:
-            continue
-    
-    # Sort and return top results
-    results.sort(key=lambda x: x[1], reverse=True)
-    return results[:top_k]
-
-
 def save_enhanced_index(index: Dict, output_path: str):
     """Save enhanced index with similarity cache to file."""
     try:
@@ -421,104 +353,42 @@ def print_cache_stats(cache: Dict):
         print(f"     - {stats['duplicate_groups']} potential duplicate groups")
 
 
-def print_query_results(results: List[Tuple[Dict, float]], query: str = None, algorithm: str = 'cosine'):
-    """Print similarity search results."""
-    if not results:
-        print("🤷 No similar code found.")
-        return
-    
-    if query:
-        print(f"🔍 Similar to: '{query}' (using {algorithm} algorithm)")
-    print(f"📊 Found {len(results)} similar items:\n")
-    
-    for i, (item, similarity) in enumerate(results, 1):
-        print(f"#{i} 🎯 Similarity: {similarity:.3f}")
-        print(f"   📁 {item['file']}:{item['line']}")
-        
-        if item['type'] == 'function':
-            print(f"   🔧 Function: {item['name']}{item['signature']}")
-        else:
-            print(f"   🏷️  Method: {item['class']}.{item['name']}{item['signature']}")
-        
-        if item['doc']:
-            print(f"   📝 {item['doc']}")
-        
-        # Show call relationships if available
-        if item.get('calls'):
-            calls = ', '.join(item['calls'][:3])
-            if len(item['calls']) > 3:
-                calls += f" (+{len(item['calls'])-3} more)"
-            print(f"   📞 Calls: {calls}")
-        
-        print()
-
-
-def print_cached_duplicates(cache: Dict, algorithm: str = 'cosine'):
-    """Print duplicate groups from cache."""
-    if algorithm not in cache.get('algorithms', {}):
-        print(f"❌ No cache data found for algorithm: {algorithm}")
-        return
-    
-    duplicates = cache['algorithms'][algorithm].get('duplicate_groups', [])
-    
-    if not duplicates:
-        print("✅ No potential duplicates found.")
-        return
-    
-    print(f"⚠️  Found {len(duplicates)} groups of potentially duplicate code (using {algorithm} algorithm):\n")
-    
-    for i, group in enumerate(duplicates, 1):
-        items = group['items']
-        sim_range = group['similarity_range']
-        print(f"Group #{i} ({len(items)} similar items, similarity: {sim_range[0]:.3f}-{sim_range[1]:.3f}):")
-        
-        for item in items:
-            print(f"  🎯 {item['score']:.3f} - {item['item']}")
-        print()
-
-
 def main():
-    """Main similarity search interface."""
+    """Main clustering interface - builds and saves similarity cache."""
     parser = argparse.ArgumentParser(
-        description='Find similar code using neural embeddings with integrated caching',
+        description='Append similarity clustering data to PROJECT_INDEX.json',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  # Build similarity cache (enhances PROJECT_INDEX.json)
-  %(prog)s --build-cache --algorithms cosine,euclidean
+  # Build similarity cache with default cosine algorithm
+  %(prog)s --build-cache
   
-  # Query from cache (fast)
-  %(prog)s -q "authentication function"
-  %(prog)s -q "validate email" --algorithm euclidean
+  # Build cache with multiple algorithms
+  %(prog)s --build-cache --algorithms cosine,euclidean,manhattan
   
-  # Custom output file
-  %(prog)s --build-cache -o ENHANCED_INDEX.json
+  # Custom output file and thresholds
+  %(prog)s --build-cache -o ENHANCED_INDEX.json --threshold 0.7
   
-  # Show cached duplicates
-  %(prog)s --duplicates --algorithm cosine
-  
-  # Real-time query (bypass cache)
-  %(prog)s -q "error handling" --no-cache
-  
-Available algorithms:
-  cosine, euclidean, manhattan, dot-product, jaccard, weighted-cosine
+  # Build cache with weighted cosine
+  %(prog)s --build-cache --algorithm weighted-cosine --weights weights.json
+
+This is Step 3 of the embedding workflow:
+  1. python3 scripts/project_index.py
+  2. python3 scripts/append_embeddings_to_index.py  
+  3. python3 scripts/append_cluster_to_embeddings_in_index.py --build-cache
         '''
     )
     
-    parser.add_argument('--version', action='version', version=f'Similarity Index v{__version__}')
+    parser.add_argument('--version', action='version', version=f'Cluster Append v{__version__}')
     
-    # Mode selection
-    parser.add_argument('--build-cache', action='store_true',
-                       help='Build similarity cache and save to index file')
-    parser.add_argument('-q', '--query', type=str,
-                       help='Search query for similar functions')
-    parser.add_argument('--duplicates', action='store_true',
-                       help='Show cached duplicate groups')
+    # Mode selection (only build-cache for this script)
+    parser.add_argument('--build-cache', action='store_true', required=True,
+                       help='Build similarity cache and append to index file')
     
     # Algorithm selection
     parser.add_argument('--algorithm', default='cosine',
                        choices=['cosine', 'euclidean', 'manhattan', 'dot-product', 'jaccard', 'weighted-cosine'],
-                       help='Similarity algorithm (default: cosine)')
+                       help='Single similarity algorithm (default: cosine)')
     parser.add_argument('--algorithms', type=str,
                        help='Comma-separated algorithms for cache building (e.g., "cosine,euclidean")')
     parser.add_argument('--weights', type=str,
@@ -530,32 +400,19 @@ Available algorithms:
     parser.add_argument('-o', '--output', type=str,
                        help='Output file for enhanced index (default: same as input)')
     
-    # Search parameters
+    # Cache building parameters
     parser.add_argument('-k', '--top-k', type=int, default=10,
-                       help='Number of top results (default: 10)')
+                       help='Number of top similar items to cache per function (default: 10)')
     parser.add_argument('-t', '--threshold', type=float, default=0.5,
-                       help='Similarity threshold (default: 0.5)')
+                       help='Similarity threshold for caching (default: 0.5)')
     parser.add_argument('--duplicate-threshold', type=float, default=0.9,
                        help='Duplicate detection threshold (default: 0.9)')
-    
-    # Runtime options
-    parser.add_argument('--no-cache', action='store_true',
-                       help='Bypass cache and calculate similarities in real-time')
-    parser.add_argument('--embed-model', default='nomic-embed-text',
-                       help='Ollama model for embeddings (default: nomic-embed-text)')
-    parser.add_argument('--embed-endpoint', default='http://localhost:11434',
-                       help='Ollama API endpoint (default: http://localhost:11434)')
     
     args = parser.parse_args()
     
     # Validate arguments
     if args.algorithm == 'weighted-cosine' and not args.weights:
         print("❌ Error: weighted-cosine algorithm requires --weights parameter")
-        sys.exit(1)
-    
-    if not any([args.build_cache, args.query, args.duplicates]):
-        print("❌ Error: Must specify --build-cache, -q/--query, or --duplicates")
-        parser.print_help()
         sys.exit(1)
     
     # Load weights if specified
@@ -571,62 +428,34 @@ Available algorithms:
     embeddings = extract_embeddings_from_index(index)
     if not embeddings:
         print("❌ No embeddings found! Generate embeddings first:")
-        print("   python3 scripts/project_index.py -e")
+        print("   python3 scripts/append_embeddings_to_index.py")
         sys.exit(1)
     
     print(f"✅ Loaded {len(embeddings)} functions/methods with embeddings\n")
     
-    # Handle cache building
-    if args.build_cache:
-        algorithms = args.algorithms.split(',') if args.algorithms else ['cosine']
-        algorithms = [alg.strip() for alg in algorithms]
-        
-        print(f"🔧 Building similarity cache with algorithms: {', '.join(algorithms)}")
-        
-        similarity_cache = build_similarity_cache(
-            embeddings, algorithms, args.threshold, 
-            args.duplicate_threshold, args.top_k, weights
-        )
-        
-        # Add cache to index
-        index['similarity_analysis'] = similarity_cache
-        
-        # Save enhanced index
-        output_path = args.output or args.input
-        save_enhanced_index(index, output_path)
-        
-        # Print statistics
-        print_cache_stats(similarity_cache)
-        return
+    # Determine algorithms to use
+    algorithms = args.algorithms.split(',') if args.algorithms else [args.algorithm]
+    algorithms = [alg.strip() for alg in algorithms]
     
-    # Handle duplicate display
-    if args.duplicates:
-        if 'similarity_analysis' not in index:
-            print("❌ No similarity cache found. Build cache first:")
-            print("   python3 similarity_index.py --build-cache")
-            sys.exit(1)
-        
-        print_cached_duplicates(index['similarity_analysis'], args.algorithm)
-        return
+    print(f"🔧 Building similarity cache with algorithms: {', '.join(algorithms)}")
     
-    # Handle query
-    if args.query:
-        print(f"🔍 Searching for: '{args.query}' (using {args.algorithm})")
-        
-        if args.no_cache or 'similarity_analysis' not in index:
-            if not args.no_cache:
-                print("⚠️  No similarity cache found, calculating in real-time...")
-            
-            results = query_from_cache(args.query, index, args.algorithm, 
-                                     args.top_k, args.threshold,
-                                     args.embed_endpoint, args.embed_model)
-        else:
-            # Use cached data would go here - for now, fall back to real-time
-            results = query_from_cache(args.query, index, args.algorithm,
-                                     args.top_k, args.threshold,
-                                     args.embed_endpoint, args.embed_model)
-        
-        print_query_results(results, args.query, args.algorithm)
+    # Build similarity cache
+    similarity_cache = build_similarity_cache(
+        embeddings, algorithms, args.threshold, 
+        args.duplicate_threshold, args.top_k, weights
+    )
+    
+    # Add cache to index
+    index['similarity_analysis'] = similarity_cache
+    
+    # Save enhanced index
+    output_path = args.output or args.input
+    save_enhanced_index(index, output_path)
+    
+    # Print statistics
+    print_cache_stats(similarity_cache)
+    print(f"\n✅ Similarity clustering completed!")
+    print(f"💡 Query similar functions with: python3 scripts/query_index.py -q 'your search'")
 
 
 if __name__ == '__main__':

@@ -1,0 +1,10 @@
+{
+  "mode": "advisory",
+  "similarity_threshold": 0.85,
+  "max_matches": 5,
+  "embedding_model": "nomic-embed-text",
+  "embedding_endpoint": "http://localhost:11434",
+  "languages": ["python", "javascript", "typescript", "shell"],
+  "ignore_patterns": ["test_*", "*_test.py", "tests/*", "spec/*", "__tests__/*"],
+  "project_type": "general"
+}

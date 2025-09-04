@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 # Add scripts directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'scripts'))
 
 try:
     from realtime_guardian import RealtimeGuardian, GuardianConfig, GuardianMode, ReviewAction
